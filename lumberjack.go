@@ -33,6 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/robfig/cron/v3"
 )
 
 const (
@@ -80,7 +82,7 @@ type Logger struct {
 	// Filename is the file to write logs to.  Backup log files will be retained
 	// in the same directory.  It uses <processname>-lumberjack.log in
 	// os.TempDir() if empty.
-	Filename string `json:"filename" yaml:"filename"`
+	Filename FileLoggerInfo `json:"filename" yaml:"filename"`
 
 	// MaxSize is the maximum size in megabytes of the log file before it gets
 	// rotated. It defaults to 100 megabytes.
@@ -103,6 +105,9 @@ type Logger struct {
 	// time.
 	LocalTime bool `json:"localtime" yaml:"localtime"`
 
+	// RotateTime
+	RotateTime time.Duration
+
 	// Compress determines if the rotated log files should be compressed
 	// using gzip. The default is not to perform compression.
 	Compress bool `json:"compress" yaml:"compress"`
@@ -113,6 +118,44 @@ type Logger struct {
 
 	millCh    chan bool
 	startMill sync.Once
+}
+
+var _conJobObj *cron.Cron
+
+func init() {
+	_conJobObj = cron.New()
+	_conJobObj.Start()
+}
+
+// NewLogger ...
+func NewLogger(loggerInfo FileLoggerInfo, opts ...func(*Logger)) *Logger {
+	logger := &Logger{
+		Filename: loggerInfo,
+	}
+
+	for _, opt := range opts {
+		opt(logger)
+	}
+
+	return logger
+}
+
+// WithRotate ...
+func WithRotate(cronTabPattern string) func(*Logger) {
+	return func(l *Logger) {
+		_conJobObj.AddFunc(cronTabPattern, func() {
+			l.Rotate()
+		})
+	}
+}
+
+// WithSplitFileByDate ...
+func WithSplitFileByDate(cronTabPattern string) func(*Logger) {
+	return func(l *Logger) {
+		_conJobObj.AddFunc(cronTabPattern, func() {
+			l.SplitFileByDate()
+		})
+	}
 }
 
 var (
@@ -159,6 +202,15 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 	l.size += int64(n)
 
 	return n, err
+}
+
+// SplitFileByDate ...
+func (l *Logger) SplitFileByDate() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.Filename.FileDate = time.Now().Format("2006-01-02")
+	l.close()
 }
 
 // Close implements io.Closer, and closes the current logfile.
@@ -265,6 +317,7 @@ func (l *Logger) openExistingOrNew(writeLen int) error {
 	l.mill()
 
 	filename := l.filename()
+	fmt.Println("filename: ", filename)
 	info, err := osStat(filename)
 	if os.IsNotExist(err) {
 		return l.openNew()
@@ -290,8 +343,8 @@ func (l *Logger) openExistingOrNew(writeLen int) error {
 
 // filename generates the name of the logfile from the current time.
 func (l *Logger) filename() string {
-	if l.Filename != "" {
-		return l.Filename
+	if l.Filename.path() != "" {
+		return l.Filename.path()
 	}
 	name := filepath.Base(os.Args[0]) + "-lumberjack.log"
 	return filepath.Join(os.TempDir(), name)
